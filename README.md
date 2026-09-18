@@ -1,5 +1,9 @@
 # PDF 双语翻译器
 
+[![tests](https://github.com/nakiriasagao/pdfTranslate/actions/workflows/tests.yml/badge.svg)](https://github.com/nakiriasagao/pdfTranslate/actions/workflows/tests.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 用 DeepSeek（或任意 OpenAI 兼容大模型）翻译 PDF，**保留原排版**、**跳过图片和表格**、
 并额外输出一份**双语对照版**。
 
