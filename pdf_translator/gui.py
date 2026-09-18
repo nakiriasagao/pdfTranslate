@@ -368,6 +368,8 @@ class PdfTranslatorApp(tk.Tk):
         self.open_button = ttk.Button(actions, text="打开输出目录", command=self._open_output_dir,
                                       width=14, state="disabled")
         self.open_button.pack(side=LEFT, padx=(PAD, 0))
+        self.cache_button = ttk.Button(actions, text="清理缓存", command=self._purge_cache, width=10)
+        self.cache_button.pack(side=LEFT, padx=(PAD, 0))
         self.start_button = ttk.Button(actions, text="▶  开始翻译", style="Go.TButton",
                                        command=self._start, width=18)
         self.start_button.pack(side=RIGHT)
@@ -502,6 +504,36 @@ class PdfTranslatorApp(tk.Tk):
             open_in_explorer(self._last_outputs[0])
         else:
             open_in_explorer(self.output_var.get() or ".")
+
+    # ------------------------------------------------------------------ #
+    def _purge_cache(self) -> None:
+        """清掉缓存里「译文 == 原文」的条目。
+
+        模型偶尔会整段不译，这类结果一旦缓存下来，之后每次重跑都会命中它、
+        那一段就永远是原文了。清掉之后下次会重新翻译这些段落。
+        """
+        if not messagebox.askyesno(
+            APP_TITLE,
+            "将清除缓存中「译文和原文完全相同」的条目。\n\n"
+            "这些是模型漏翻留下的记录，会让对应段落永远显示英文。\n"
+            "已经正常翻译好的内容不会受影响。\n\n确定继续吗？",
+        ):
+            return
+        from .translator import TranslationCache
+
+        settings = self._collect_settings()
+        cache = TranslationCache(path=(settings.cache_file or "").strip() or None, enabled=True)
+        try:
+            removed = cache.purge_untranslated()
+            remaining = cache.count()
+        finally:
+            cache.close()
+        self._show_log_page()
+        self._log(f"🧹 已清除 {removed} 条无效缓存（「译文==原文」），缓存现有 {remaining} 条记录。", "ok")
+        if removed:
+            self._log("   重新点「开始翻译」即可把这些漏翻的段落补上（其余内容仍走缓存）。", "info")
+        else:
+            self._log("   没有发现需要清理的条目。", "info")
 
     # ------------------------------------------------------------------ #
     # 引擎辅助

@@ -119,34 +119,46 @@ _MATH_SYMBOLS = set(
     "=+−-×÷±∓∑∏∫∮√∛≤≥≠≈≡≃∼∝∈∉∋⊂⊆⊃⊇∪∩∧∨¬∀∃∄∇∂∞→←↔⇒⇔∴∵⊥∥∠°′″^_{}[]()|/\\"
 )
 
+#: 「强」数学符号：出现它们基本可以断定这里在讲数学，而不是普通正文里的标点。
+#: 特意排除了 = ( ) [ ] | / ^ _ 这些日常也会用到的字符。
+_STRONG_MATH = set(
+    "∈∉∋⊂⊆⊃⊇∪∩∧∨¬∀∃∄∇∂∞→←↔⇒⇔∴∵⊥∥∠∑∏∫∮√∛≤≥≠≈≡≃∼∝±∓×÷°′″"
+)
+
 #: 至少 3 个字母的连续英文串，用来区分「自然语言」和「变量名」
 _WORD_RE = re.compile(r"[A-Za-z]{3,}")
 
 
 def looks_like_formula(text: str, font_name: str = "") -> bool:
-    """判断一个文字块是不是**独立公式**（这类块原样保留，不翻译）。
+    """判断一个文字块是不是**数学内容**（原样保留，不翻译）。
 
-    区分「整块公式」和「正文里夹了公式」：
-      * ``φ0: u4 u0 u5 u1 u3 u2`` → 公式
-      * ``Practical cost estimation (ci,li). Since deriving…`` → 正文，要翻译
+    三种情况都算：
+      * ``φ0: u4 u0 u5 u1 u3 u2`` —— 整块公式，凑不出正常英文单词
+      * ``Δ = 2`` / ``n= 9 e= 11`` —— 短小的变量表达式
+      * ``(1) For each vertex u ∈ VQ , L(F(u)) = LQ(u) …`` —— 数学符号密集的
+        定义/定理。这类文字虽然夹着英文，但翻译后中文与符号混排、上下标丢失，
+        格式反而更乱，保持原样更稳妥。
 
-    判据是**有没有正常的英文单词**：公式里只有单字母变量和符号，凑不出三个字母
-    以上的词。再加一道「数学字体 + 短文本」的保险。
+    区分的关键是**强数学符号**（``∈ ≤ ∑ →`` 等）：普通正文里的 ``= ( )``
+    不算数，否则会把一整段正常文字误判成公式。
     """
     stripped = (text or "").strip()
-    if not stripped or len(stripped) > 220:
+    if not stripped or len(stripped) > 400:
         return False
 
     words = _WORD_RE.findall(stripped)
-    if len(words) >= 3:
-        return False  # 已经是自然语言了
-
     letters = sum(1 for ch in stripped if ch.isalpha())
     digits = sum(1 for ch in stripped if ch.isdigit())
     symbols = sum(1 for ch in stripped if ch in _MATH_SYMBOLS)
+    strong = sum(1 for ch in stripped if ch in _STRONG_MATH)
 
+    # ① 强数学符号反复出现 → 数学内容
+    if strong >= 2:
+        return True
+    # ② 通篇没有正常英文单词，只有零散变量和符号 → 公式行
     if not words and (letters + digits) >= 2 and symbols >= 1:
-        return True  # 只有零散变量 + 符号，典型的公式行
+        return True
+    # ③ 数学字体 + 短文本，且凑不出多少英文单词
     if _MATH_FONT_RE.search(font_name or "") and len(words) < 3 and len(stripped) <= 160:
         return True
     return False

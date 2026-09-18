@@ -167,6 +167,37 @@ class TranslationCache:
             except sqlite3.Error:
                 pass
 
+    # ------------------------------------------------------------------ #
+    def purge_untranslated(self) -> int:
+        """删掉「译文 == 原文」的缓存条目，返回删除条数。
+
+        模型偶尔会整段不译，这类结果一旦缓存下来，之后每次重跑都会命中它、
+        那一段就永远是原文了。把它们清掉，下次会重新尝试翻译。
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    "DELETE FROM translations WHERE source = target AND LENGTH(source) > 8"
+                )
+                self._conn.commit()
+                return int(cursor.rowcount or 0)
+            except sqlite3.Error:
+                return 0
+
+    def clear(self) -> int:
+        """清空整个缓存，返回删除条数。"""
+        if not self.enabled or self._conn is None:
+            return 0
+        with self._lock:
+            try:
+                cursor = self._conn.execute("DELETE FROM translations")
+                self._conn.commit()
+                return int(cursor.rowcount or 0)
+            except sqlite3.Error:
+                return 0
+
     def count(self) -> int:
         if not self.enabled or self._conn is None:
             return 0
@@ -335,11 +366,18 @@ class Translator:
                     value = normalise_text(translated) or source
                     value = self.glossary.apply(value)
                     block.translation = value
-                    self.cache.put(self._cache_key(source), source, value, self.settings.model)
+                    if _should_cache(source, value):
+                        self.cache.put(
+                            self._cache_key(source), source, value, self.settings.model
+                        )
 
                 with self._progress_lock:
                     self._done += len(batch)
                     self.progress(self._done, self._total)
+
+        # 模型偶尔会整段不译（一次请求塞太多段时尤其明显）。
+        # 这些段落单独再问一次，别让它们就这么留在原文上。
+        self._retry_untranslated(pending)
 
         usage.add(self.engine.usage)
         if self._fatal is not None:
@@ -348,6 +386,38 @@ class Translator:
                 "已经翻译好的部分会命中缓存、不会重复计费。"
             )
         return usage
+
+    # ------------------------------------------------------------------ #
+    def _retry_untranslated(self, pending: Sequence[TextBlock]) -> int:
+        """把「译文 == 原文」且本应翻译的段落单独重试一遍。"""
+        if self._fatal is not None:
+            return 0
+        missed = [
+            block
+            for block in pending
+            if is_translatable(normalise_text(block.text))
+            and (block.translation or "").strip() == normalise_text(block.text)
+        ]
+        if not missed:
+            return 0
+
+        self.log(f"· 有 {len(missed)} 段模型没有翻译（原样返回），正在逐段重试…")
+        recovered = 0
+        for block in missed:
+            source = normalise_text(block.text)
+            try:
+                result = self._request_batch([source])
+            except TranslationError:
+                continue
+            value = normalise_text(result[0]) if result else ""
+            if not value or value == source:
+                continue
+            value = self.glossary.apply(value)
+            block.translation = value
+            self.cache.put(self._cache_key(source), source, value, self.settings.model)
+            recovered += 1
+        self.log(f"  重试补翻了 {recovered}/{len(missed)} 段")
+        return recovered
 
     # ------------------------------------------------------------------ #
     def _already_target_language(self, text: str) -> bool:
@@ -471,6 +541,19 @@ def _is_cjk(ch: str) -> bool:
         or 0x4E00 <= code <= 0x9FFF
         or 0xAC00 <= code <= 0xD7AF
     )
+
+
+def _should_cache(source: str, value: str) -> bool:
+    """判断一条译文值不值得写进缓存。
+
+    **译文和原文一模一样时不要缓存**（除非源文本本来就无需翻译，比如纯符号、
+    纯数字、参考文献编号）。模型偶尔会整段不译，如果把这种结果缓存下来，
+    以后每次重跑都会命中它，那一段就永远是原文了 —— 这正是
+    「明明翻译过了，某些段落却还是英文」的元凶。
+    """
+    if value != source:
+        return True
+    return not is_translatable(source)
 
 
 def _estimate_max_tokens(texts: Sequence[str]) -> int:

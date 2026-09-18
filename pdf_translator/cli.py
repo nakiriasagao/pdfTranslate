@@ -134,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     group = parser.add_argument_group("其它")
     group.add_argument("--no-cache", action="store_true", help="禁用译文缓存")
     group.add_argument("--cache-file", default="", help="指定译文缓存数据库路径")
+    group.add_argument(
+        "--purge-cache", action="store_true",
+        help="清掉缓存里「译文==原文」的条目（模型漏翻留下的），然后退出",
+    )
+    group.add_argument("--clear-cache", action="store_true", help="清空整个译文缓存，然后退出")
     group.add_argument("--dry-run", action="store_true", help="只解析 PDF 并统计，不调用 API")
     group.add_argument("--json", dest="as_json", action="store_true", help="以 JSON 输出结果摘要")
     group.add_argument("-q", "--quiet", action="store_true", help="只输出警告与结果")
@@ -299,6 +304,22 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(paint(f"参数错误：{exc}", "red"), file=sys.stderr)
         return 2
+
+    if args.purge_cache or args.clear_cache:
+        from .translator import TranslationCache
+
+        cache = TranslationCache(path=settings.cache_file or None, enabled=True)
+        try:
+            if args.clear_cache:
+                removed = cache.clear()
+                print(f"已清空译文缓存，删除 {removed} 条记录")
+            else:
+                removed = cache.purge_untranslated()
+                print(f"已清除 {removed} 条「译文==原文」的无效缓存（模型漏翻留下的）")
+            print(f"缓存现有 {cache.count()} 条记录")
+        finally:
+            cache.close()
+        return 0
 
     if args.test:
         try:

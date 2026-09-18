@@ -461,6 +461,63 @@ def test_figure_and_formula_skip(workdir: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def test_untranslated_retry(sample: Path, workdir: Path) -> None:
+    """回归：模型整段不译时，结果不能进缓存，并且要自动重试。
+
+    真实故障：一次请求里塞了很多段，模型偶尔会原样返回其中几段。早期版本把这
+    种「译文 == 原文」当成正常结果写进缓存，之后每次重跑都命中它，那一段就
+    永远是英文了 —— 表现为「明明翻译过了，某些段落却还是英文」。
+    """
+    print("\n[9] 模型漏翻时不进缓存且自动重试（回归）")
+    from pdf_translator.translator import TranslationCache, _should_cache
+
+    check(_should_cache("Hello world", "你好世界") is True, "正常译文允许写缓存")
+    check(_should_cache("Hello world", "Hello world") is False,
+          "模型漏翻（译文 == 原文）不允许写缓存")
+    check(_should_cache("1234", "1234") is True, "纯数字可以写缓存")
+    check(_should_cache("[1]", "[1]") is True, "引用标记可以写缓存")
+
+    httpd, url = start_mock_server(skip_once=True)
+    try:
+        cache_file = workdir / "retry_test" / "cache.sqlite3"
+        settings = Settings()
+        settings.input_pdf = str(sample)
+        settings.output_dir = str(workdir / "retry_test")
+        settings.engine = "custom"
+        settings.base_url = url
+        settings.api_key = "mock"
+        settings.model = "mock"
+        settings.target_lang = "zh"
+        settings.concurrency = 2
+        settings.use_cache = True
+        settings.cache_file = str(cache_file)
+        setattr(settings, "_modes", [MODE_REPLACED])
+
+        result = Pipeline(settings, log=lambda _m: None).run(sample)
+        with fitz.open(result.outputs[0]) as doc:
+            text = "".join(doc[i].get_text() for i in range(doc.page_count))
+
+        # 第一次请求被 mock 原样返回，重试后应该补翻
+        check("【译】" in text, "重试后拿到了译文")
+        body = "Retrieval-augmented generation (RAG) has become a standard technique"
+        check(body not in text, "原本被漏翻的正文段落已被补翻", "该段仍是英文")
+
+        cache = TranslationCache(path=cache_file, enabled=True)
+        try:
+            total = cache.count()
+            same = cache._conn.execute(
+                "SELECT COUNT(*) FROM translations WHERE source = target"
+            ).fetchone()[0]
+        finally:
+            cache.close()
+        check(total > 0, "缓存里确实写入了记录", f"{total} 条")
+        check(same == 0, "缓存里没有任何「译文==原文」的条目", f"仍有 {same} 条")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="pdf-translator-test-"))
     print(f"临时目录：{workdir}")
@@ -477,6 +534,7 @@ def main() -> int:
         test_alignment_and_splitting()
         test_merge_captions_and_underlines(workdir)
         test_figure_and_formula_skip(workdir)
+        test_untranslated_retry(sample, workdir)
     finally:
         httpd.shutdown()
         httpd.server_close()

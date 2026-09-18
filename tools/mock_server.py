@@ -53,6 +53,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     # 由 start_mock_server 注入
     flaky: int = 0
+    skip_once: bool = False          # 模拟模型漏翻：每段第一次请求时原样返回
+    skipped_once: set = set()        # 已经「漏翻」过的文本
     counter = {"n": 0}
     lock = threading.Lock()
     verbose: bool = False
@@ -114,6 +116,15 @@ class _Handler(BaseHTTPRequestHandler):
 
         translations = [fake_translate(t, i) for i, t in enumerate(items)]
 
+        # 模拟「模型整段不译」：每段文字第一次被请求时原样返回，第二次才正常翻译。
+        # 用来验证客户端有没有把这种结果错误地写进缓存、以及会不会自动重试。
+        if self.skip_once:
+            with _Handler.lock:
+                for index, item in enumerate(items):
+                    if item and item not in _Handler.skipped_once:
+                        _Handler.skipped_once.add(item)
+                        translations[index] = item
+
         # 模拟模型偶发不听话：故意少返回一条，用来验证二分重试降级
         if self.flaky and call_no % self.flaky == 0 and len(translations) > 1:
             translations = translations[:-1]
@@ -154,9 +165,16 @@ def _extract_array(text: str) -> str | None:
     return None
 
 
-def start_mock_server(port: int = 0, *, flaky: int = 0, verbose: bool = False) -> tuple[ThreadingHTTPServer, str]:
-    """在后台线程启动 Mock 服务，返回 (server, base_url)。port=0 表示随机可用端口。"""
+def start_mock_server(
+    port: int = 0, *, flaky: int = 0, skip_once: bool = False, verbose: bool = False
+) -> tuple[ThreadingHTTPServer, str]:
+    """在后台线程启动 Mock 服务，返回 (server, base_url)。port=0 表示随机可用端口。
+
+    ``skip_once=True`` 时每段文字第一次被请求会原样返回（模拟模型漏翻）。
+    """
     _Handler.flaky = flaky
+    _Handler.skip_once = skip_once
+    _Handler.skipped_once = set()
     _Handler.verbose = verbose
     _Handler.counter = {"n": 0}
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
