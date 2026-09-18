@@ -1,0 +1,11 @@
+# 批处理文件是 GBK 编码 + CRLF，交给 git 转换换行会出问题，按二进制原样保存
+*.bat -text
+*.cmd -text
+
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+
+*.pdf binary
+*.png binary

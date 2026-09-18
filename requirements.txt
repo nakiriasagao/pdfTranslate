@@ -1,0 +1,8 @@
+# PDF 双语翻译器 —— 运行依赖
+# 安装： python -m pip install -r requirements.txt
+
+PyMuPDF>=1.24.0      # PDF 解析 / 文本定位 / 重建排版（核心）
+requests>=2.31.0     # 调用 DeepSeek 等 OpenAI 兼容接口（纯 HTTP，无需 openai SDK）
+
+# 图形界面使用 Python 自带的 tkinter，无需额外安装。
+# 可选：pip install pillow    # 仅在需要 GUI 内预览缩略图时使用
