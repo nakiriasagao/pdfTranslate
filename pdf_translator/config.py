@@ -185,6 +185,10 @@ class Settings:
     use_cache: bool = True
     cache_file: str = ""               # 缓存库路径；留空=用户缓存目录
 
+    # --- 阅读笔记 ---
+    generate_notes: bool = True        # 翻译的同时生成一份速读笔记（Markdown）
+    notes_suffix: str = "_阅读笔记"
+
     # --- 界面 ---
     last_open_dir: str = ""
 

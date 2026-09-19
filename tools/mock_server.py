@@ -129,7 +129,19 @@ class _Handler(BaseHTTPRequestHandler):
         if self.flaky and call_no % self.flaky == 0 and len(translations) > 1:
             translations = translations[:-1]
 
-        content = json.dumps(translations, ensure_ascii=False)
+        if items:
+            content = json.dumps(translations, ensure_ascii=False)
+        else:
+            # 不是批量翻译请求（例如「阅读笔记」那种一次性问答），
+            # 返回一段固定格式的三段式笔记，供客户端解析测试。
+            content = (
+                "① 问题定义：输入是一篇英文 PDF 论文，输出是保留原排版的译文；"
+                "约束是不改动图片、表格、公式与图表标注。\n"
+                "② 应用场合：面向需要快速读懂英文论文的研究生与工程师，"
+                "解决阅读速度与语言障碍的问题。\n"
+                "③ 贡献：提出了一套基于版面几何的跳过规则（图片对象、表格线、"
+                "图形聚类），在不破坏图表的前提下完整翻译正文，并用离线自检验证。"
+            )
         prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
         self._send(200, {
             "id": f"chatcmpl-mock-{call_no}",

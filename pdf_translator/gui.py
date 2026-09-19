@@ -298,17 +298,22 @@ class PdfTranslatorApp(tk.Tk):
         self.translate_headers_var = BooleanVar(value=True)
         self.expand_var = BooleanVar(value=True)
         self.cache_var = BooleanVar(value=True)
+        self.notes_var = BooleanVar(value=True)
         ttk.Checkbutton(checks, text="翻译表格内文字", variable=self.translate_tables_var).pack(side=LEFT)
         ttk.Checkbutton(checks, text="翻译图表标注与公式", variable=self.translate_figures_var).pack(side=LEFT, padx=(12, 0))
         ttk.Checkbutton(checks, text="翻译页眉页脚", variable=self.translate_headers_var).pack(side=LEFT, padx=(12, 0))
-        ttk.Checkbutton(checks, text="允许译文向下扩展", variable=self.expand_var).pack(side=LEFT, padx=(12, 0))
-        ttk.Checkbutton(checks, text="使用译文缓存（省 token）", variable=self.cache_var).pack(side=LEFT, padx=(12, 0))
+
+        checks2 = ttk.Frame(frame)
+        checks2.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(checks2, text="允许译文向下扩展", variable=self.expand_var).pack(side=LEFT)
+        ttk.Checkbutton(checks2, text="使用译文缓存（省 token）", variable=self.cache_var).pack(side=LEFT, padx=(12, 0))
+        ttk.Checkbutton(checks2, text="生成阅读笔记", variable=self.notes_var).pack(side=LEFT, padx=(12, 0))
 
         ttk.Label(
             frame, style="Hint.TLabel",
-            text="提示：图表（含坐标轴、图例）和独立公式默认原样保留、不翻译；"
-                 "只有勾选上面第二项才会一起翻。",
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+            text="图表（含坐标轴、图例）和独立公式默认原样保留；勾第二项才会一起翻。"
+                 "「生成阅读笔记」会额外输出一份 .md，按「问题定义 / 应用场合 / 贡献」三节速读。",
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
     # ------------------------------------------------------------------ #
     def _build_output(self, parent: ttk.Frame) -> None:
@@ -410,6 +415,7 @@ class PdfTranslatorApp(tk.Tk):
         self.output_var.set(settings.output_dir)
         self.translate_tables_var.set(settings.translate_tables)
         self.translate_figures_var.set(settings.translate_figures)
+        self.notes_var.set(settings.generate_notes)
         self.translate_headers_var.set(settings.translate_headers)
         self.expand_var.set(settings.allow_expand_down)
         self.cache_var.set(settings.use_cache)
@@ -432,6 +438,7 @@ class PdfTranslatorApp(tk.Tk):
         settings.output_dir = self.output_var.get().strip()
         settings.translate_tables = bool(self.translate_tables_var.get())
         settings.translate_figures = bool(self.translate_figures_var.get())
+        settings.generate_notes = bool(self.notes_var.get())
         settings.translate_headers = bool(self.translate_headers_var.get())
         settings.allow_expand_down = bool(self.expand_var.get())
         settings.use_cache = bool(self.cache_var.get())

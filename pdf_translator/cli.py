@@ -115,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument("--no-headers", action="store_true", help="不翻译页眉页脚")
     group.add_argument("--no-skip-same-lang", action="store_true", help="即使已是目标语言也强制送翻")
+    group.add_argument(
+        "--no-notes", action="store_true",
+        help="不生成阅读笔记（默认会输出一份速读笔记 .md：问题定义/应用场合/贡献）",
+    )
     group.add_argument("--batch-chars", type=int, default=None, help="单次请求的最大字符数，默认 2400")
 
     group = parser.add_argument_group("版面")
@@ -193,6 +197,7 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
     settings.translate_figures = args.translate_figures
     settings.translate_headers = not args.no_headers
     settings.skip_translated = not args.no_skip_same_lang
+    settings.generate_notes = not args.no_notes
     settings.replace_mode = args.replace_mode
     settings.bilingual_split = args.bilingual_split
     settings.allow_expand_down = not args.no_expand

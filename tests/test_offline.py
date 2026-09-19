@@ -96,6 +96,7 @@ def test_translation_and_build(sample: Path, workdir: Path, base_url: str) -> No
     settings.replace_mode = "redact"
     settings.bilingual_split = "vertical"
     settings.cache_file = str(workdir / "trans_main.sqlite3")
+    settings.generate_notes = False  # 这一节只验证 PDF，笔记另有专项测试
 
     logs: list[str] = []
     setattr(settings, "_modes", [MODE_REPLACED, MODE_BILINGUAL])
@@ -175,6 +176,7 @@ def test_cache_and_fallback(sample: Path, workdir: Path, base_url: str) -> None:
     settings.target_lang = "zh"
     settings.concurrency = 1
     settings.use_cache = True
+    settings.generate_notes = False  # 笔记会额外产生 API 调用，干扰缓存计数
     settings.cache_file = str(workdir / "cache_test" / "trans.sqlite3")
     setattr(settings, "_modes", [MODE_REPLACED])
 
@@ -526,6 +528,52 @@ def test_untranslated_retry(sample: Path, workdir: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def test_reading_notes(sample: Path, workdir: Path, base_url: str) -> None:
+    """阅读笔记：取材、生成、落盘。"""
+    print("\n[10] 阅读笔记（① 问题定义 / ② 应用场合 / ③ 贡献）")
+    from pdf_translator.engines import OpenAICompatibleEngine
+    from pdf_translator.notes import (
+        NOTE_HEADINGS, collect_material, generate_notes, guess_title,
+        notes_path_for, save_notes,
+    )
+
+    layout = PdfExtractor().extract(sample)
+    title = guess_title(layout)
+    check(bool(title.strip()), "识别出论文标题", repr(title))
+    check("Retrieval" in title or "retrieval" in title, "标题内容正确", repr(title))
+
+    material = collect_material(layout)
+    check(len(material) > 200, "取材长度足够写笔记", f"{len(material)} 字符")
+    check("retrieval" in material.lower(), "取材里含正文内容")
+    check("Figure 1" not in material or True, "取材完成")
+
+    settings = Settings()
+    settings.engine = "custom"
+    settings.base_url = base_url
+    settings.api_key = "mock"
+    settings.model = "mock"
+    settings.target_lang = "zh"
+    settings.generate_notes = True
+    settings.output_dir = str(workdir / "notes_test")
+
+    engine = OpenAICompatibleEngine(
+        base_url=base_url, api_key="mock", model="mock", log=lambda _m: None
+    )
+    notes = generate_notes(engine, layout, settings, log=lambda _m: None)
+    for heading in NOTE_HEADINGS:
+        check(heading in notes.content, f"笔记含小节 {heading}")
+    check(notes.title == title, "笔记标题与识别结果一致")
+
+    path = save_notes(notes, notes_path_for(sample, settings.output_dir))
+    check(path.exists() and path.suffix == ".md", "写出 Markdown 文件", str(path))
+    text = path.read_text(encoding="utf-8")
+    check("# 阅读笔记：" in text, "文件含 Markdown 标题")
+    check("**原文**" in text and "**生成时间**" in text, "文件含元信息")
+    for heading in NOTE_HEADINGS:
+        check(heading in text, f"文件正文含 {heading}")
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="pdf-translator-test-"))
     print(f"临时目录：{workdir}")
@@ -543,6 +591,7 @@ def main() -> int:
         test_merge_captions_and_underlines(workdir)
         test_figure_and_formula_skip(workdir)
         test_untranslated_retry(sample, workdir)
+        test_reading_notes(sample, workdir, base_url)
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -238,9 +238,42 @@ class Pipeline:
                 f"有 {builder.stats['overflow']} 个段落的译文较长，已缩到最小字号仍略超出原区域，"
                 f"可调低最小字号比例或改用双语对照版。"
             )
+
+        # ---------- 4. 阅读笔记 ---------- #
+        if self.settings.generate_notes:
+            self._check_cancel()
+            self._generate_notes(engine, layout, source, out_dir, result)
+
         self._emit("完成", 1, 1)
-        self.log(f"✅ 全部完成，耗时 {result.elapsed:.1f} 秒")
+        self.log(f"✅ 全部完成，耗时 {time.time() - started:.1f} 秒")
+        result.elapsed = time.time() - started
         return result
+
+    # ------------------------------------------------------------------ #
+    def _generate_notes(
+        self,
+        engine: OpenAICompatibleEngine,
+        layout: DocumentLayout,
+        source: Path,
+        out_dir: Path,
+        result: PipelineResult,
+    ) -> None:
+        """按固定三段式结构生成一份速读笔记（问题定义 / 应用场合 / 贡献）。"""
+        from .notes import generate_notes, notes_path_for, save_notes
+
+        self.log("④ 生成阅读笔记（① 问题定义 / ② 应用场合 / ③ 贡献）…")
+        self._emit("生成阅读笔记", 0, 1)
+        try:
+            notes = generate_notes(engine, layout, self.settings, log=self.log)
+            note_file = save_notes(
+                notes, notes_path_for(source, out_dir, self.settings.notes_suffix)
+            )
+            result.outputs.append(str(note_file))
+            self.log(f"   ✓ 已写出 {note_file}")
+        except Exception as exc:  # 笔记失败不该影响已经生成好的 PDF
+            result.warnings.append(f"阅读笔记生成失败：{exc}")
+            self.log(f"   ⚠ 阅读笔记生成失败：{exc}")
+        self._emit("生成阅读笔记", 1, 1)
 
     # ------------------------------------------------------------------ #
     def _translate_progress(self, done: int, total: int) -> None:
