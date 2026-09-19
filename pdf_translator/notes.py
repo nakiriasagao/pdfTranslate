@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import re
+import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +69,8 @@ class ReadingNotes:
     model: str = ""
     target_lang: str = "zh"
     created: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
+    detailed: str = ""          # 章节精读（按小标题逐节总结）
+    section_count: int = 0
 
     def to_markdown(self) -> str:
         lang = TARGET_LANGUAGES.get(self.target_lang, self.target_lang)
@@ -77,12 +81,27 @@ class ReadingNotes:
             f"- **生成时间**：{self.created}",
             f"- **翻译引擎**：{self.model}",
             f"- **笔记语言**：{lang}",
+        ]
+        if self.section_count:
+            lines.append(f"- **章节精读**：{self.section_count} 节")
+        lines += [
             "",
             "---",
+            "",
+            "## 速读",
             "",
             self.content.strip(),
             "",
         ]
+        if self.detailed.strip():
+            lines += [
+                "---",
+                "",
+                "## 章节精读",
+                "",
+                self.detailed.strip(),
+                "",
+            ]
         return "\n".join(lines)
 
 
@@ -227,12 +246,200 @@ def notes_path_for(pdf_path: str | Path, output_dir: str | Path, suffix: str = "
     return Path(output_dir) / f"{source.stem}{suffix}.md"
 
 
+# --------------------------------------------------------------------------- #
+# 章节精读：按小标题切分正文，逐节总结
+# --------------------------------------------------------------------------- #
+
+DEFAULT_SECTION_CHARS = 3500
+DEFAULT_MAX_SECTIONS = 30
+
+#: 章节小标题：编号 + 大写字母/汉字开头的短标题
+_SECTION_RE = re.compile(r"^\s*(\d+(?:\.\d+){0,3})\s*\.?\s+([A-Z\u4e00-\u9fff][^\n]{2,110})$")
+
+#: 伪代码、公式行、坐标轴刻度的特征 —— 它们常以数字开头，会被误当成小标题
+_CODEISH_RE = re.compile(
+    r"[∈←→×÷≤≥∑∏∫√∀∃∇∂(){}\\]|for each|\bdo\b|\bfor\b|\bFunction\b|\breturn\b|\bend\b",
+    re.I,
+)
+
+_SECTION_PROMPT = """你是一名资深研究者，正在为同行撰写论文的精读笔记。\
+下面给出论文中某一小节的完整内容，请**只针对这一节**写摘要。
+
+严格按下面的格式输出（Markdown，不要任何前后缀、不要复述全文）：
+
+**主题**：这一节在讲什么？一句话说清。
+
+**专有名词**：逐一列出本节出现的专业术语，格式为「术语 —— 一句话解释」，用分号隔开；确实没有就写「无」。
+
+**关键内容**：
+- 方法/方案/算法的核心思路，或某个公式的含义（用文字讲清楚它算的是什么，不要照抄符号）
+- 图表：图 X / 表 Y 展示了什么，它想说明什么问题
+- 数据：若有实验数据，说明谁比谁高或低、变化趋势如何、这些数字意味着什么
+
+要求：
+- 只写这一节，不要提及其他章节，不要写「本节介绍了…」这类空话
+- **有数据的地方必须解释数据的意义**（对比、趋势、量级），不要只把数字抄一遍
+- 用{lang}撰写；专业术语首次出现时保留英文原词
+- 原文没有提到的内容不要编造；该节确实没有图表或数据时，对应那一条写「无」
+"""
+
+
+@dataclass
+class Section:
+    """论文中的一个小节。"""
+
+    number: str
+    title: str
+    page: int
+    text: str
+
+    @property
+    def heading(self) -> str:
+        return f"{self.number} {self.title}".strip()
+
+
+def _heading_of(block: object, body_size: float) -> tuple[str, str] | None:
+    """判断一个块是不是章节小标题，是则返回 (编号, 标题文字)。"""
+    text = (getattr(block, "text", "") or "").strip()
+    if not text or len(text) > 120:
+        return None
+    match = _SECTION_RE.match(text)
+    if not match:
+        return None
+    if _CODEISH_RE.search(text):
+        return None  # 伪代码行、公式行
+    size = float(getattr(block, "font_size", 0.0))
+    bold = bool(getattr(block, "is_bold", False))
+    # 标题要么比正文大一点，要么加粗。伪代码行和坐标轴刻度都跟正文同号且不加粗，
+    # 靠这一条把它们挡掉。
+    if size < body_size * 1.05 and not bold:
+        return None
+    if size < body_size * 0.95:
+        return None
+    return match.group(1), match.group(2).strip()
+
+
+def split_sections(
+    layout: DocumentLayout,
+    *,
+    max_chars: int = DEFAULT_SECTION_CHARS,
+    max_sections: int = DEFAULT_MAX_SECTIONS,
+) -> list[Section]:
+    """按小标题把正文切成若干节。"""
+    blocks: list[tuple[int, object]] = []
+    for page in layout.pages:
+        for block in page.blocks:
+            blocks.append((page.index, block))
+    blocks.sort(key=lambda item: (item[0], item[1].bbox[1]))  # type: ignore[attr-defined]
+
+    sizes = [float(getattr(b, "font_size", 0.0)) for _p, b in blocks]
+    body_size = statistics.median(sizes) if sizes else 10.0
+
+    sections: list[Section] = []
+    current: dict | None = None
+
+    def flush() -> None:
+        if not current:
+            return
+        text = "\n\n".join(current["parts"])[:max_chars].strip()
+        if text:
+            sections.append(
+                Section(current["number"], current["title"], current["page"], text)
+            )
+
+    for page_index, block in blocks:
+        head = _heading_of(block, body_size)
+        if head:
+            flush()
+            current = {
+                "number": head[0], "title": head[1],
+                "page": page_index + 1, "parts": [],
+            }
+            continue
+        if current is None:
+            continue  # 第一个小标题之前是标题页/摘要，不属于任何一节
+        text = (getattr(block, "text", "") or "").strip()
+        if len(text) >= 20:
+            current["parts"].append(text)
+
+    flush()
+    return sections[:max_sections]
+
+
+def summarise_section(
+    engine: OpenAICompatibleEngine, section: Section, target_lang: str
+) -> str:
+    """为单个小节生成摘要。"""
+    lang = TARGET_LANGUAGES.get(target_lang, target_lang)
+    messages = [
+        {"role": "system", "content": _SECTION_PROMPT.format(lang=lang)},
+        {
+            "role": "user",
+            "content": (
+                f"小节标题：{section.heading}\n\n"
+                f"<<<小节内容开始>>>\n{section.text}\n<<<小节内容结束>>>"
+            ),
+        },
+    ]
+    result = engine.chat(messages, temperature=0.3, max_tokens=900)
+    return (result.text or "").strip()
+
+
+def summarise_sections(
+    engine: OpenAICompatibleEngine,
+    sections: list[Section],
+    settings: Settings,
+    *,
+    log: Callable[[str], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> tuple[str, int]:
+    """并发为每一节生成摘要，返回 (Markdown 文本, 成功节数)。"""
+    log = log or (lambda _m: None)
+    progress = progress or (lambda _d, _t: None)
+    if not sections:
+        return "", 0
+
+    results: dict[str, str] = {}
+    done = 0
+    workers = max(1, min(int(settings.concurrency or 3), 6))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(summarise_section, engine, section, settings.target_lang): section
+            for section in sections
+        }
+        for future in as_completed(futures):
+            section = futures[future]
+            try:
+                text = future.result()
+                if text:
+                    results[section.heading] = text
+            except TranslationError as exc:
+                log(f"   ⚠ 小节「{section.heading}」总结失败：{exc}")
+            done += 1
+            progress(done, len(sections))
+
+    lines: list[str] = []
+    for section in sections:
+        body = results.get(section.heading)
+        if not body:
+            continue
+        lines += [f"### {section.heading}", "", f"*（第 {section.page} 页）*", "", body, ""]
+    return "\n".join(lines).strip(), len(results)
+
+
 __all__ = [
     "ReadingNotes",
+    "Section",
     "NOTE_HEADINGS",
+    "DEFAULT_MAX_SECTIONS",
+    "DEFAULT_SECTION_CHARS",
     "collect_material",
     "generate_notes",
     "guess_title",
     "notes_path_for",
     "save_notes",
+    "split_sections",
+    "summarise_section",
+    "summarise_sections",
 ]

@@ -299,6 +299,7 @@ class PdfTranslatorApp(tk.Tk):
         self.expand_var = BooleanVar(value=True)
         self.cache_var = BooleanVar(value=True)
         self.notes_var = BooleanVar(value=True)
+        self.detailed_notes_var = BooleanVar(value=True)
         ttk.Checkbutton(checks, text="翻译表格内文字", variable=self.translate_tables_var).pack(side=LEFT)
         ttk.Checkbutton(checks, text="翻译图表标注与公式", variable=self.translate_figures_var).pack(side=LEFT, padx=(12, 0))
         ttk.Checkbutton(checks, text="翻译页眉页脚", variable=self.translate_headers_var).pack(side=LEFT, padx=(12, 0))
@@ -308,11 +309,13 @@ class PdfTranslatorApp(tk.Tk):
         ttk.Checkbutton(checks2, text="允许译文向下扩展", variable=self.expand_var).pack(side=LEFT)
         ttk.Checkbutton(checks2, text="使用译文缓存（省 token）", variable=self.cache_var).pack(side=LEFT, padx=(12, 0))
         ttk.Checkbutton(checks2, text="生成阅读笔记", variable=self.notes_var).pack(side=LEFT, padx=(12, 0))
+        ttk.Checkbutton(checks2, text="含章节精读", variable=self.detailed_notes_var).pack(side=LEFT, padx=(6, 0))
 
         ttk.Label(
             frame, style="Hint.TLabel",
             text="图表（含坐标轴、图例）和独立公式默认原样保留；勾第二项才会一起翻。"
-                 "「生成阅读笔记」会额外输出一份 .md，按「问题定义 / 应用场合 / 贡献」三节速读。",
+                 "「生成阅读笔记」输出一份 .md：速读三节（问题定义/应用场合/贡献）"
+                 "＋ 逐小节的章节精读（主题/专有名词/关键内容）。",
         ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
     # ------------------------------------------------------------------ #
@@ -416,6 +419,7 @@ class PdfTranslatorApp(tk.Tk):
         self.translate_tables_var.set(settings.translate_tables)
         self.translate_figures_var.set(settings.translate_figures)
         self.notes_var.set(settings.generate_notes)
+        self.detailed_notes_var.set(settings.notes_detailed)
         self.translate_headers_var.set(settings.translate_headers)
         self.expand_var.set(settings.allow_expand_down)
         self.cache_var.set(settings.use_cache)
@@ -439,6 +443,7 @@ class PdfTranslatorApp(tk.Tk):
         settings.translate_tables = bool(self.translate_tables_var.get())
         settings.translate_figures = bool(self.translate_figures_var.get())
         settings.generate_notes = bool(self.notes_var.get())
+        settings.notes_detailed = bool(self.detailed_notes_var.get())
         settings.translate_headers = bool(self.translate_headers_var.get())
         settings.allow_expand_down = bool(self.expand_var.get())
         settings.use_cache = bool(self.cache_var.get())

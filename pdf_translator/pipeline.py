@@ -258,13 +258,37 @@ class Pipeline:
         out_dir: Path,
         result: PipelineResult,
     ) -> None:
-        """按固定三段式结构生成一份速读笔记（问题定义 / 应用场合 / 贡献）。"""
-        from .notes import generate_notes, notes_path_for, save_notes
+        """按固定三段式结构生成速读笔记；可选再按小标题逐节做精读。"""
+        from .notes import (
+            generate_notes, notes_path_for, save_notes,
+            split_sections, summarise_sections,
+        )
 
         self.log("④ 生成阅读笔记（① 问题定义 / ② 应用场合 / ③ 贡献）…")
         self._emit("生成阅读笔记", 0, 1)
         try:
             notes = generate_notes(engine, layout, self.settings, log=self.log)
+
+            if self.settings.notes_detailed:
+                sections = split_sections(
+                    layout,
+                    max_chars=max(500, int(self.settings.notes_section_chars)),
+                    max_sections=max(1, int(self.settings.notes_max_sections)),
+                )
+                if sections:
+                    self.log(f"   识别出 {len(sections)} 个小节，正在逐节精读…")
+                    self._emit("章节精读", 0, len(sections))
+                    detailed, count = summarise_sections(
+                        engine, sections, self.settings,
+                        log=self.log,
+                        progress=lambda d, t: self._emit("章节精读", d, t),
+                    )
+                    notes.detailed = detailed
+                    notes.section_count = count
+                    self.log(f"   ✓ 完成 {count}/{len(sections)} 节的精读")
+                else:
+                    self.log("   · 没识别到带编号的小标题，跳过章节精读")
+
             note_file = save_notes(
                 notes, notes_path_for(source, out_dir, self.settings.notes_suffix)
             )

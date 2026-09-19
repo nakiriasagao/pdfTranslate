@@ -119,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-notes", action="store_true",
         help="不生成阅读笔记（默认会输出一份速读笔记 .md：问题定义/应用场合/贡献）",
     )
+    group.add_argument(
+        "--no-detailed-notes", action="store_true",
+        help="阅读笔记只出速读三节，不做逐小节的章节精读",
+    )
+    group.add_argument("--max-sections", type=int, default=None, help="章节精读的节数上限，默认 30")
     group.add_argument("--batch-chars", type=int, default=None, help="单次请求的最大字符数，默认 2400")
 
     group = parser.add_argument_group("版面")
@@ -198,6 +203,9 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
     settings.translate_headers = not args.no_headers
     settings.skip_translated = not args.no_skip_same_lang
     settings.generate_notes = not args.no_notes
+    settings.notes_detailed = not args.no_detailed_notes
+    if args.max_sections is not None:
+        settings.notes_max_sections = args.max_sections
     settings.replace_mode = args.replace_mode
     settings.bilingual_split = args.bilingual_split
     settings.allow_expand_down = not args.no_expand

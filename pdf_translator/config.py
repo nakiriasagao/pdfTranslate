@@ -188,6 +188,9 @@ class Settings:
     # --- 阅读笔记 ---
     generate_notes: bool = True        # 翻译的同时生成一份速读笔记（Markdown）
     notes_suffix: str = "_阅读笔记"
+    notes_detailed: bool = True        # 再按小标题逐节做精读（主题/名词/关键内容）
+    notes_max_sections: int = 30       # 精读的章节数上限
+    notes_section_chars: int = 3500    # 每节送给模型的字符上限
 
     # --- 界面 ---
     last_open_dir: str = ""
