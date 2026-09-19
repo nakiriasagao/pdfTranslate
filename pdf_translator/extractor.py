@@ -110,16 +110,18 @@ def is_caption(text: str) -> bool:
 def looks_like_prose(text: str) -> bool:
     """判断一个文字块是不是**成段的正文**。
 
-    表格单元格和图内标签都是短片段；一段带好几个句号的完整文字，几乎不可能
-    是它们。``find_tables`` 与 ``cluster_drawings`` 的外接矩形经常把紧贴表格、
-    图形的正文段落圈进去，靠这条把它们放出来正常翻译。
+    表格单元格和图内标签都是短片段；一段成句的文字几乎不可能是它们。
+    ``find_tables`` 与 ``cluster_drawings`` 的外接矩形经常把紧贴表格、图形的
+    正文段落圈进去，靠这条把它们放出来正常翻译。
+
+    阈值取得比较松：**宁可偶尔把图内标签当成正文翻掉，也不能漏掉正文**。
     """
     stripped = (text or "").strip()
-    if len(stripped) < 150:
+    if len(stripped) < 80:
         return False
-    if len(_WORD_RE.findall(stripped)) < 15:
+    if len(_WORD_RE.findall(stripped)) < 8:
         return False
-    return stripped.count(".") >= 2
+    return stripped.count(".") >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -786,9 +788,12 @@ class PdfExtractor:
             merged = _merge_block_group(group)
             for text_block in self._build_text_blocks(merged, index, order):
                 bbox = text_block.bbox
-                # 图题和成段正文都要放行：表格/图表区域都是靠线条猜出来的，
-                # 它们的外接矩形难免把紧贴着的标题、正文段落一并圈进去。
-                protected = is_caption(text_block.text) or looks_like_prose(text_block.text)
+                # 成段正文**无条件翻译**，不受下面任何规则约束。
+                # 跳过规则都是靠几何推断出来的（表格线、图形聚类），难免把紧贴
+                # 它们的段落、例子圈进去；宁可偶尔挡到图片，也不能漏掉正文。
+                if looks_like_prose(text_block.text):
+                    layout.blocks.append(text_block)
+                    continue
 
                 # 图片区域来自 PDF 的图片对象，位置可靠 —— 压在图片里的说明文字一律不翻。
                 if skip_images and any(
@@ -799,10 +804,14 @@ class PdfExtractor:
                     # 旁边块的译文向下扩展时必须绕开，否则会压上去叠字。
                     layout.skip_regions.append(SkipRegion(bbox, "text", index))
                     continue
+
+                # 表格/图表区域是靠线条猜的，外接矩形难免把紧贴它们的图题圈进去。
+                # 图题恰恰最该翻译，所以对它豁免这两条（但不豁免图片区域）。
+                caption = is_caption(text_block.text)
                 # 表格里的单元格文字：保持原样
                 if (
                     skip_tables
-                    and not protected
+                    and not caption
                     and any(_overlap_ratio(bbox, r) > _TABLE_OVERLAP for r in table_rects)
                 ):
                     self.skipped_overlap += 1
@@ -811,13 +820,13 @@ class PdfExtractor:
                 # 图表内的坐标轴标题、图例、标注：属于图表的一部分，保持原样
                 if (
                     skip_figures
-                    and not protected
+                    and not caption
                     and any(_overlap_ratio(bbox, r) > _DRAWING_OVERLAP for r in drawing_rects)
                 ):
                     self.skipped_overlap += 1
                     layout.skip_regions.append(SkipRegion(bbox, "text", index))
                     continue
-                # 数学内容（整块公式、短变量表达式、符号密集的定义）：保持原样
+                # 数学内容（整块公式、短变量表达式）：保持原样
                 if skip_figures and looks_like_formula(
                     text_block.text, text_block.font_name
                 ):
