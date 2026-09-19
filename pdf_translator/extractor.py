@@ -107,6 +107,21 @@ def is_caption(text: str) -> bool:
     return bool(_CAPTION_RE.match(text or ""))
 
 
+def looks_like_prose(text: str) -> bool:
+    """判断一个文字块是不是**成段的正文**。
+
+    表格单元格和图内标签都是短片段；一段带好几个句号的完整文字，几乎不可能
+    是它们。``find_tables`` 与 ``cluster_drawings`` 的外接矩形经常把紧贴表格、
+    图形的正文段落圈进去，靠这条把它们放出来正常翻译。
+    """
+    stripped = (text or "").strip()
+    if len(stripped) < 150:
+        return False
+    if len(_WORD_RE.findall(stripped)) < 15:
+        return False
+    return stripped.count(".") >= 2
+
+
 # --------------------------------------------------------------------------- #
 # 公式识别
 # --------------------------------------------------------------------------- #
@@ -499,8 +514,14 @@ def _block_bbox(block: dict[str, Any]) -> tuple[float, float, float, float]:
 #: 两个文本块的 bbox 重叠超过「较小块面积」的这个比例，就认为是同一段内容被拆开了
 _BLOCK_MERGE_OVERLAP = 0.30
 
-#: 与「图形区域」重叠超过这个比例的文字块，视为图表内的标注，不翻译
-_DRAWING_OVERLAP = 0.20
+#: 与「图形区域」重叠超过这个比例的文字块，视为图表内的标注，不翻译。
+#: 实测分布是两极的：真正的图内标签（坐标轴、图例、节点名）几乎都是 100% 重叠，
+#: 而正文、例子、图题大多在 60% 以下 —— 图形聚类出的外接矩形难免把紧贴图形
+#: 周围的文字圈进来。取 70% 能把两者分开。
+_DRAWING_OVERLAP = 0.70
+#: 与「表格区域」重叠超过这个比例的文字块才跳过。find_tables 同样会把紧贴表格的
+#: 正文段落圈进来，只有真正落在单元格内部的文字才该保持原样，所以用同一把尺子。
+_TABLE_OVERLAP = 0.70
 #: 图形区域至少要占页面这么大才算真正的图表（用来滤掉零星装饰线）
 _MIN_DRAWING_AREA_RATIO = 0.003
 #: 图形区域向外扩一点，让紧贴图形的坐标轴标题、图例、子图标题也能被覆盖
@@ -717,6 +738,12 @@ class PdfExtractor:
                     tables = list(getattr(finder, "tables", []))
                 for table in tables:
                     bbox = tuple(float(v) for v in table.bbox)
+                    # 至少要是个 2×2 的网格才算表格。find_tables 有时会把表格标题
+                    # 或紧贴表格的正文段落也识别成一个「表格」。
+                    rows = int(getattr(table, "row_count", 0) or 0)
+                    cols = int(getattr(table, "col_count", 0) or 0)
+                    if rows and cols and (rows < 2 or cols < 2):
+                        continue
                     table_rects.append(bbox)
                     layout.skip_regions.append(SkipRegion(bbox, "table", index))
             except Exception as exc:  # 表格识别失败不应影响主流程
@@ -759,6 +786,10 @@ class PdfExtractor:
             merged = _merge_block_group(group)
             for text_block in self._build_text_blocks(merged, index, order):
                 bbox = text_block.bbox
+                # 图题和成段正文都要放行：表格/图表区域都是靠线条猜出来的，
+                # 它们的外接矩形难免把紧贴着的标题、正文段落一并圈进去。
+                protected = is_caption(text_block.text) or looks_like_prose(text_block.text)
+
                 # 图片区域来自 PDF 的图片对象，位置可靠 —— 压在图片里的说明文字一律不翻。
                 if skip_images and any(
                     _overlap_ratio(bbox, r) > 0.35 for r in image_rects
@@ -768,24 +799,25 @@ class PdfExtractor:
                     # 旁边块的译文向下扩展时必须绕开，否则会压上去叠字。
                     layout.skip_regions.append(SkipRegion(bbox, "text", index))
                     continue
-                # 表格区域是靠线条猜的，柱状图/折线图经常被误判成表格，
-                # 紧贴它们的图题就会被连带丢掉。图题恰恰最该翻译，所以完全豁免。
+                # 表格里的单元格文字：保持原样
                 if (
                     skip_tables
-                    and not is_caption(text_block.text)
-                    and any(_overlap_ratio(bbox, r) > 0.30 for r in table_rects)
+                    and not protected
+                    and any(_overlap_ratio(bbox, r) > _TABLE_OVERLAP for r in table_rects)
                 ):
                     self.skipped_overlap += 1
                     layout.skip_regions.append(SkipRegion(bbox, "text", index))
                     continue
                 # 图表内的坐标轴标题、图例、标注：属于图表的一部分，保持原样
-                if skip_figures and any(
-                    _overlap_ratio(bbox, r) > _DRAWING_OVERLAP for r in drawing_rects
+                if (
+                    skip_figures
+                    and not protected
+                    and any(_overlap_ratio(bbox, r) > _DRAWING_OVERLAP for r in drawing_rects)
                 ):
                     self.skipped_overlap += 1
                     layout.skip_regions.append(SkipRegion(bbox, "text", index))
                     continue
-                # 独立公式（整块都是变量和符号）：保持原样
+                # 数学内容（整块公式、短变量表达式、符号密集的定义）：保持原样
                 if skip_figures and looks_like_formula(
                     text_block.text, text_block.font_name
                 ):
