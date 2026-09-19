@@ -21,6 +21,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
+# Windows 控制台默认是 GBK，输出 ✓/✗ 会直接抛 UnicodeEncodeError
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 try:
     import pymupdf as fitz
 except ImportError:  # pragma: no cover

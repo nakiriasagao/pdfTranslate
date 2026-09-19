@@ -14,6 +14,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Windows 控制台默认是 GBK，输出 ✓/✗ 会直接抛 UnicodeEncodeError
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 PASSED: list[str] = []
 FAILED: list[str] = []
 
