@@ -574,6 +574,46 @@ def test_reading_notes(sample: Path, workdir: Path, base_url: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def test_section_heading_formats() -> None:
+    """回归：不同出版社的小标题编号格式都要认得。
+
+    真实故障：用户拿 IEEE 期刊论文跑章节精读，一篇都没切出小节 —— 我只支持
+    阿拉伯数字（``1 Introduction``），而 IEEE 用的是罗马数字（``I. INTRODUCTION``）、
+    字母（``A. Applications``）和 ``1) Scenarios``。而且 IEEE 的标题字号（7.97pt）
+    比正文（9.96pt）还小，字号判据也把标题挡掉了。
+    """
+    print("\n[11] 小标题编号格式与页眉排除（回归）")
+    from pdf_translator.notes import _SECTION_RE, _heading_of
+
+    for text in ("1 Introduction", "3.2 Filter-based Reduction", "3.2.1 Detail",
+                 "I. INTRODUCTION", "II. RELATED WORK", "IV. METHODOLOGY",
+                 "A. Applications of Dynamic Graph Learning",
+                 "1) Dynamic Graph Scenarios"):
+        check(bool(_SECTION_RE.match(text)), f"识别为小标题：{text!r}")
+    for text in ("A Survey of Deep Graph Clustering", "I am a sentence",
+                 "Are we there yet"):
+        check(not _SECTION_RE.match(text), f"不误判正文：{text!r}")
+
+    class _B:
+        """构造一个假文字块。"""
+
+        def __init__(self, text: str, size: float, y: float = 300.0) -> None:
+            self.text = text
+            self.font_size = size
+            self.is_bold = False
+            self.bbox = (50.0, y, 300.0, y + 9.0)
+
+    check(_heading_of(_B("I. INTRODUCTION", 7.97), 9.96, 720.0) is not None,
+          "标题字号小于正文时仍能识别（IEEE 情况）")
+    check(_heading_of(_B("5106 IEEE TRANSACTIONS ON KNOWLEDGE", 6.97, y=20.0),
+                      9.96, 720.0) is None, "页眉不会被当成标题")
+    check(_heading_of(_B("5106 IEEE TRANSACTIONS ON KNOWLEDGE", 6.97, y=700.0),
+                      9.96, 720.0) is None, "页脚不会被当成标题")
+    check(_heading_of(_B("8 Function Enumerate (M, ΔM, φ)", 9.96), 9.96, 720.0) is None,
+          "伪代码行不会被当成标题")
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="pdf-translator-test-"))
     print(f"临时目录：{workdir}")
@@ -592,6 +632,7 @@ def main() -> int:
         test_figure_and_formula_skip(workdir)
         test_untranslated_retry(sample, workdir)
         test_reading_notes(sample, workdir, base_url)
+        test_section_heading_formats()
     finally:
         httpd.shutdown()
         httpd.server_close()

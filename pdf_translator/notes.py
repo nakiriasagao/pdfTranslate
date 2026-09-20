@@ -253,8 +253,19 @@ def notes_path_for(pdf_path: str | Path, output_dir: str | Path, suffix: str = "
 DEFAULT_SECTION_CHARS = 3500
 DEFAULT_MAX_SECTIONS = 30
 
-#: 章节小标题：编号 + 大写字母/汉字开头的短标题
-_SECTION_RE = re.compile(r"^\s*(\d+(?:\.\d+){0,3})\s*\.?\s+([A-Z\u4e00-\u9fff][^\n]{2,110})$")
+#: 章节小标题。不同出版社的编号习惯差别很大，这里都要认：
+#:   ``1 Introduction`` / ``3.2 Filter-based``  —— ACM 与多数期刊
+#:   ``I. INTRODUCTION``                        —— IEEE 一级标题（罗马数字）
+#:   ``A. Applications`` / ``1) Scenarios``     —— IEEE 的子标题
+#: 字母编号**必须带点**（``A.``），否则正文里的「A Survey of…」会被误判成标题。
+_SECTION_RE = re.compile(
+    r"^\s*("
+    r"\d+(?:\.\d+){0,3}\s*[.)]?"      # 1 / 1. / 3.2.1 / 1)
+    r"|[IVXLCDM]{1,7}\s*\."           # I. / II. / IV.
+    r"|[A-Z]\s*\."                    # A. / B.
+    r")\s+"
+    r"([A-Z\u4e00-\u9fff][^\n]{2,110})$"
+)
 
 #: 伪代码、公式行、坐标轴刻度的特征 —— 它们常以数字开头，会被误当成小标题
 _CODEISH_RE = re.compile(
@@ -298,8 +309,15 @@ class Section:
         return f"{self.number} {self.title}".strip()
 
 
-def _heading_of(block: object, body_size: float) -> tuple[str, str] | None:
-    """判断一个块是不是章节小标题，是则返回 (编号, 标题文字)。"""
+def _heading_of(
+    block: object, body_size: float, page_height: float = 0.0
+) -> tuple[str, str] | None:
+    """判断一个块是不是章节小标题，是则返回 (编号, 标题文字)。
+
+    字号**不能**当作主要判据：实测 IEEE 期刊里 ``I. INTRODUCTION`` 只有 7.97pt，
+    而正文中位字号是 9.96pt —— 标题比正文还小。所以这里以「编号格式」为主，
+    字号只用来排除明显更小的东西（页脚、脚注、图表刻度）。
+    """
     text = (getattr(block, "text", "") or "").strip()
     if not text or len(text) > 120:
         return None
@@ -308,15 +326,46 @@ def _heading_of(block: object, body_size: float) -> tuple[str, str] | None:
         return None
     if _CODEISH_RE.search(text):
         return None  # 伪代码行、公式行
+    number, title = match.group(1).strip(), match.group(2).strip()
+
+    # 页眉页脚：贴着页面上下边缘。它们常以页码开头（「5106 IEEE TRANSACTIONS…」），
+    # 光看编号格式会误判成章节标题。
+    if page_height > 0:
+        top = float(getattr(block, "bbox", (0, 0, 0, 0))[1])
+        bottom = float(getattr(block, "bbox", (0, 0, 0, 0))[3])
+        if bottom <= page_height * 0.10 or top >= page_height * 0.90:
+            return None
+
+    # 明显比正文小的一律不算（脚注、图表刻度）
     size = float(getattr(block, "font_size", 0.0))
-    bold = bool(getattr(block, "is_bold", False))
-    # 标题要么比正文大一点，要么加粗。伪代码行和坐标轴刻度都跟正文同号且不加粗，
-    # 靠这一条把它们挡掉。
-    if size < body_size * 1.05 and not bold:
+    if size and body_size and size < body_size * 0.80:
         return None
-    if size < body_size * 0.95:
-        return None
-    return match.group(1), match.group(2).strip()
+
+    return number, title
+
+
+def _is_two_column(layout: DocumentLayout) -> bool:
+    """判断是不是双栏排版（IEEE 期刊基本都是）。
+
+    双栏文档如果直接按 y 排序，左右栏的内容会交织在一起：右栏顶部的子标题
+    会排到左栏底部的正文前面，章节归属就乱了。
+    """
+    left = right = total = 0
+    for page in layout.pages:
+        half = page.width / 2
+        for block in page.blocks:
+            bbox = getattr(block, "bbox", None)
+            if not bbox:
+                continue
+            centre = (bbox[0] + bbox[2]) / 2
+            total += 1
+            if centre < half * 0.9:
+                left += 1
+            elif centre > half * 1.1:
+                right += 1
+    if total < 20:
+        return False
+    return left / total > 0.3 and right / total > 0.3
 
 
 def split_sections(
@@ -326,13 +375,20 @@ def split_sections(
     max_sections: int = DEFAULT_MAX_SECTIONS,
 ) -> list[Section]:
     """按小标题把正文切成若干节。"""
-    blocks: list[tuple[int, object]] = []
+    two_column = _is_two_column(layout)
+    blocks: list[tuple[int, int, float, object]] = []
     for page in layout.pages:
+        half = page.width / 2
         for block in page.blocks:
-            blocks.append((page.index, block))
-    blocks.sort(key=lambda item: (item[0], item[1].bbox[1]))  # type: ignore[attr-defined]
+            bbox = getattr(block, "bbox", (0, 0, 0, 0))
+            # 双栏时把「栏」插进排序键，保证先读左栏再读右栏
+            column = 0
+            if two_column:
+                column = 1 if (bbox[0] + bbox[2]) / 2 >= half else 0
+            blocks.append((page.index, column, float(page.height), block))
+    blocks.sort(key=lambda item: (item[0], item[1], item[3].bbox[1]))  # type: ignore[attr-defined]
 
-    sizes = [float(getattr(b, "font_size", 0.0)) for _p, b in blocks]
+    sizes = [float(getattr(b, "font_size", 0.0)) for _p, _c, _h, b in blocks]
     body_size = statistics.median(sizes) if sizes else 10.0
 
     sections: list[Section] = []
@@ -347,8 +403,8 @@ def split_sections(
                 Section(current["number"], current["title"], current["page"], text)
             )
 
-    for page_index, block in blocks:
-        head = _heading_of(block, body_size)
+    for page_index, _column, page_height, block in blocks:
+        head = _heading_of(block, body_size, page_height)
         if head:
             flush()
             current = {
