@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 from tkinter import (
     BOTH, BOTTOM, END, HORIZONTAL, LEFT, RIGHT, TOP, VERTICAL, X, Y,
@@ -34,6 +36,10 @@ from .pipeline import CancelledError, Pipeline, StageProgress
 
 PAD = 8
 _CANCELLED = "__cancelled__"
+
+#: 运行日志目录。界面上的日志关掉窗口就没了，出问题时无从查起，
+#: 所以每次都落一份到磁盘，最新的固定叫 last_run.log。
+LOG_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "pdf-translator" / "logs"
 
 LANG_CHOICES = [(code, label) for code, label in TARGET_LANGUAGES.items()]
 LANG_LABEL_TO_CODE = {label: code for code, label in LANG_CHOICES}
@@ -92,6 +98,7 @@ class PdfTranslatorApp(tk.Tk):
         self.worker: threading.Thread | None = None
         self.cancel_flag = threading.Event()
         self._last_outputs: list[str] = []
+        self._log_path: Path | None = None
 
         self._init_style()
         self._build_ui()
@@ -583,6 +590,39 @@ class PdfTranslatorApp(tk.Tk):
         self.log_text.insert(END, message + "\n", tag or "")
         self.log_text.see(END)
         self.log_text.configure(state="disabled")
+        self._log_file_write(message)
+
+    def _log_file_write(self, message: str) -> None:
+        """把日志同时写进文件。
+
+        界面上的日志关掉窗口就没了，出问题时无从查起 —— 用户报「某几篇没翻译完」
+        时，没有日志就只能靠猜。日志落在用户目录下，最新的在 last_run.log。
+        """
+        path = self._log_path
+        if not path:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        except OSError:
+            pass  # 日志写不进去不该影响翻译
+
+    def _log_file_start(self) -> None:
+        """开始新一轮任务时另起一份日志，并清空界面。"""
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._log_path = LOG_DIR / f"run_{stamp}.log"
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", END)
+        self.log_text.configure(state="disabled")
+        self._log_file_write(f"===== {datetime.now():%Y-%m-%d %H:%M:%S} 开始 =====")
+        try:
+            latest = LOG_DIR / "last_run.log"
+            if latest.exists():
+                latest.unlink()
+            shutil.copy2(self._log_path, latest)
+        except OSError:
+            pass
 
     def _set_busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
@@ -608,17 +648,16 @@ class PdfTranslatorApp(tk.Tk):
         self.cancel_flag.clear()
         self._set_busy(True)
         self._show_log_page()
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", END)
-        self.log_text.configure(state="disabled")
+        self._log_file_start()
         self.worker = threading.Thread(target=self._scan_worker, args=(list(self.files),), daemon=True)
         self.worker.start()
 
     def _scan_worker(self, files: list[str]) -> None:
-        try:
-            extractor = PdfExtractor(log=lambda m: self.messages.put(("log", m)))
-            for index, path in enumerate(files, start=1):
-                self.messages.put(("status", f"扫描 {index}/{len(files)}"))
+        failed: list[tuple[str, str]] = []
+        extractor = PdfExtractor(log=lambda m: self.messages.put(("log", m)))
+        for index, path in enumerate(files, start=1):
+            self.messages.put(("status", f"扫描 {index}/{len(files)}"))
+            try:
                 layout = extractor.extract(path)
                 stats = layout.stats()
                 self.messages.put((
@@ -631,11 +670,14 @@ class PdfTranslatorApp(tk.Tk):
                 ))
                 if stats["pages_with_text"] == 0:
                     self.messages.put(("warn", "    ⚠ 没有文字层，可能是扫描件，需要先 OCR。"))
-            self.messages.put(("status", "扫描完成"))
-            self.messages.put(("done_busy", None))
-        except Exception as exc:
-            self.messages.put(("error", f"扫描失败：{exc}"))
-            self.messages.put(("done_busy", None))
+            except Exception as exc:  # 单个文件读不了不该中断整批扫描
+                failed.append((Path(path).name, str(exc)))
+                self.messages.put(("error", f"❌ {Path(path).name} 扫描失败：{exc}"))
+                continue
+        if failed:
+            self.messages.put(("warn", f"⚠ 有 {len(failed)} 个文件扫描失败。"))
+        self.messages.put(("status", "扫描完成"))
+        self.messages.put(("done_busy", None))
 
     # ------------------------------------------------------------------ #
     def _start(self) -> None:
@@ -673,9 +715,7 @@ class PdfTranslatorApp(tk.Tk):
         self._last_outputs = []
         self.open_button.configure(state="disabled")
         self.progress_var.set(0)
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", END)
-        self.log_text.configure(state="disabled")
+        self._log_file_start()
         self._log(f"开始处理 {len(self.files)} 个文件，引擎 {settings.model}", "info")
 
         self.worker = threading.Thread(
@@ -687,31 +727,54 @@ class PdfTranslatorApp(tk.Tk):
     def _translate_worker(self, settings: Settings, files: list[str], modes: list[str]) -> None:
         total = len(files)
         all_outputs: list[str] = []
+        failed: list[tuple[str, str]] = []
         try:
             for index, path in enumerate(files, start=1):
                 if self.cancel_flag.is_set():
                     raise CancelledError("已停止")
-                self.messages.put(("log", f"\n【{index}/{total}】{Path(path).name}"))
-                task = settings.clone(input_pdf=path)
-                setattr(task, "_modes", modes)
-                pipeline = Pipeline(
-                    task,
-                    log=lambda m: self.messages.put(("log", m)),
-                    progress=lambda p: self.messages.put(("progress", (index, total, p))),
-                    cancel=self.cancel_flag.is_set,
-                )
-                result = pipeline.run(path)
+                name = Path(path).name
+                self.messages.put(("log", f"\n【{index}/{total}】{name}"))
+                # 每个文件单独兜异常：一个文件失败绝不能拖垮整批，
+                # 否则排在后面的论文会一个都不处理（这就是「部分论文没翻译」的原因）。
+                try:
+                    task = settings.clone(input_pdf=path)
+                    setattr(task, "_modes", modes)
+                    pipeline = Pipeline(
+                        task,
+                        log=lambda m: self.messages.put(("log", m)),
+                        progress=lambda p: self.messages.put(("progress", (index, total, p))),
+                        cancel=self.cancel_flag.is_set,
+                    )
+                    result = pipeline.run(path)
+                except CancelledError:
+                    raise
+                except Exception as exc:
+                    failed.append((name, str(exc)))
+                    self.messages.put(("error", f"❌ 第 {index} 个文件处理失败：{name}"))
+                    self.messages.put(("error", f"   {type(exc).__name__}: {exc}"))
+                    for line in traceback.format_exc(limit=8).splitlines()[-8:]:
+                        self.messages.put(("error", "   " + line))
+                    self.messages.put(("log", "   ↷ 跳过这个文件，继续处理后面的。"))
+                    continue
+
                 all_outputs.extend(result.outputs)
                 self.messages.put(("log", result.summary()))
                 for warning in result.warnings:
                     self.messages.put(("warn", "⚠ " + warning))
+
+            if failed:
+                self.messages.put((
+                    "warn",
+                    f"\n⚠ 有 {len(failed)}/{total} 个文件失败，其余已正常完成。失败的可以重跑"
+                    f"（已翻译的部分会命中缓存，不会重复计费）：",
+                ))
+                for name, reason in failed:
+                    self.messages.put(("warn", f"   · {name} —— {reason}"))
+            else:
+                self.messages.put(("log", f"\n✅ {total} 个文件全部处理完成。"))
             self.messages.put(("done", all_outputs))
         except CancelledError:
             self.messages.put(("log", "⏹ 已停止。"))
-            self.messages.put(("done", all_outputs))
-        except Exception as exc:
-            self.messages.put(("error", f"❌ {exc}"))
-            self.messages.put(("error", traceback.format_exc(limit=6)))
             self.messages.put(("done", all_outputs))
 
     # ------------------------------------------------------------------ #

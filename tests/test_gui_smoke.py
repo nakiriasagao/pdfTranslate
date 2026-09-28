@@ -157,6 +157,45 @@ def main() -> int:
         app.update()
         check(app.notebook.index(app.notebook.select()) == 2, "调用后切到日志页")
 
+        print("\n[8] 批量处理时单个文件失败不中断整批（回归）")
+        # 真实故障：整批被包在一个 try 里，任何一篇论文抛异常都会让后面的
+        # 文件一个都不处理，表现为「部分论文没翻译」。
+        from unittest import mock
+
+        from pdf_translator.config import MODE_REPLACED, Settings
+        from pdf_translator.pipeline import Pipeline, PipelineResult
+
+        batch_settings = Settings()
+        batch_settings.engine = "custom"
+        batch_settings.base_url = "http://127.0.0.1:1/v1"   # 不会真的联网
+        batch_settings.api_key = "mock"
+
+        calls: list[str] = []
+
+        def fake_run(self, path=None):  # noqa: ANN001
+            name = str(path)
+            calls.append(name)
+            if "boom" in name:
+                raise RuntimeError("模拟解析失败")
+            return PipelineResult(source_pdf=name, outputs=[name + ".out"])
+
+        app.messages = __import__("queue").Queue()
+        with mock.patch.object(Pipeline, "run", fake_run):
+            app._translate_worker(batch_settings, ["a.pdf", "boom.pdf", "c.pdf"], [MODE_REPLACED])
+
+        check(calls == ["a.pdf", "boom.pdf", "c.pdf"],
+              "三个文件都被尝试过（失败的不中断后续）", str(calls))
+
+        logs: list[str] = []
+        while not app.messages.empty():
+            kind, payload = app.messages.get_nowait()
+            logs.append(f"[{kind}] {payload}")
+        joined = "\n".join(logs)
+        check("跳过这个文件，继续处理后面的" in joined, "日志提示已跳过失败文件")
+        check("有 1/3 个文件失败" in joined, "结尾汇总报告失败数量")
+        check(any("c.pdf" in line and "done" in line for line in logs) or "c.pdf.out" in joined,
+              "失败之后的文件确实产出了结果")
+
         app.withdraw()
     finally:
         app.destroy()

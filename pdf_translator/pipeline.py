@@ -53,6 +53,7 @@ class PipelineResult:
     elapsed: float = 0.0
     stats: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    untranslated: int = 0
 
     def summary(self) -> str:
         lines = [
@@ -207,6 +208,31 @@ class Pipeline:
         finally:
             cache.close()
         self._check_cancel()
+
+        # 统计有多少段最终没能翻出来（仍然和原文一模一样）。这些段落**没有写入
+        # 缓存**，所以只要重跑一次就会重新尝试 —— 常见原因是 API 限流或网络抖动。
+        from .translator import is_translatable, normalise_text
+
+        untranslated = [
+            b
+            for b in blocks_to_translate
+            if is_translatable(b.text)
+            and (b.translation or "").strip() == normalise_text(b.text)
+        ]
+        result.untranslated = len(untranslated)
+        if untranslated:
+            where = "、".join(
+                f"第 {b.page + 1} 页" if hasattr(b, "page") else ""
+                for b in untranslated[:3]
+            )
+            result.warnings.append(
+                f"有 {len(untranslated)} 个段落未能翻译（保留原文，例如 {where}）。"
+                f"这些段落没有写入缓存，重新运行即可补齐。"
+            )
+            self.log(
+                f"   ⚠ 有 {len(untranslated)} 个段落未能翻译（保留原文），"
+                f"它们没有写入缓存，重跑即可补齐"
+            )
 
         # ---------- 3. 生成 PDF ---------- #
         builder = PdfBuilder(self.settings, log=self.log)
