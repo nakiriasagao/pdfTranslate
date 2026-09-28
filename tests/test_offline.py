@@ -614,6 +614,37 @@ def test_section_heading_formats() -> None:
 
 
 # --------------------------------------------------------------------------- #
+def test_damaged_pdf_message(workdir: Path) -> None:
+    """回归：下载不完整的 PDF 要给出能照着办的提示。
+
+    真实故障：用户从 arXiv 下的某篇 PDF 只有 111 KB（其余都 300KB+），文件头是
+    %PDF-1.7 但结尾没有 %%EOF —— 下载中断。PyMuPDF 只抛
+    ``Failed to open file ... as type pdf.``，用户完全看不出该做什么。
+    """
+    print("\n[12] 损坏 / 不完整 PDF 的提示（回归）")
+    from pdf_translator.extractor import _diagnose_unreadable
+
+    truncated = workdir / "truncated.pdf"
+    truncated.write_bytes(
+        b"%PDF-1.7\n%\xbf\xf7\xa2\xfe\n1 0 obj\n<< /Lang (en) >>\nendobj\n"
+        b"328 0 obj\n<< /Type /Annot >>"     # 在对象中间截断，没有 %%EOF
+    )
+    message = _diagnose_unreadable(truncated, RuntimeError("boom"))
+    check("%%EOF" in message or "不完整" in message, "提示说明文件不完整", message[:56])
+    check("重新下载" in message, "提示告诉用户怎么办")
+
+    not_pdf = workdir / "not_a_pdf.pdf"
+    not_pdf.write_bytes(b"<!DOCTYPE html><html><body>404 Not Found</body></html>")
+    message = _diagnose_unreadable(not_pdf, RuntimeError("boom"))
+    check("不是 PDF" in message, "非 PDF 文件提示这不是 PDF", message[:56])
+
+    tiny = workdir / "tiny.pdf"
+    tiny.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    message = _diagnose_unreadable(tiny, RuntimeError("boom"))
+    check("明显不完整" in message or "重新下载" in message, "过小的文件也提示重下", message[:56])
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="pdf-translator-test-"))
     print(f"临时目录：{workdir}")
@@ -633,6 +664,7 @@ def main() -> int:
         test_untranslated_retry(sample, workdir)
         test_reading_notes(sample, workdir, base_url)
         test_section_heading_formats()
+        test_damaged_pdf_message(workdir)
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -604,6 +604,10 @@ class PdfTranslatorApp(tk.Tk):
         try:
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(message + "\n")
+            # last_run.log 要一直跟当前这份保持同步。只在开头复制一次的话，
+            # 事后拿到的永远是只有一行的那份。
+            latest = LOG_DIR / "last_run.log"
+            shutil.copyfile(path, latest)
         except OSError:
             pass  # 日志写不进去不该影响翻译
 

@@ -181,6 +181,52 @@ def looks_like_formula(text: str, font_name: str = "") -> bool:
     return False
 
 
+class PdfUnreadableError(RuntimeError):
+    """PDF 打不开（损坏、截断、或根本不是 PDF）。"""
+
+
+def _diagnose_unreadable(path: Path, exc: Exception) -> str:
+    """把「打不开」翻译成用户能照着办的说明。
+
+    最常见的情况是下载中断：文件头是 ``%PDF-`` 看着正常，但结尾没有 ``%%EOF``，
+    内容在某个对象中间就断了。直接抛 PyMuPDF 的原始异常（``Failed to open file
+    ... as type pdf.``）用户完全看不出发生了什么。
+    """
+    name = path.name
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    try:
+        head = path.read_bytes()[:1024]
+    except OSError:
+        head = b""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(max(0, size - 4096))
+            tail = handle.read()
+    except OSError:
+        tail = b""
+
+    if not head.startswith(b"%PDF"):
+        return (
+            f"「{name}」不是 PDF 文件（文件头不是 %PDF-）。"
+            f"可能是下载到了网页或错误页，请重新下载。"
+        )
+    if b"%%EOF" not in tail:
+        return (
+            f"「{name}」文件不完整：缺少 PDF 结束标记 %%EOF，正文在中间就断了"
+            f"（当前大小 {size / 1024:.0f} KB）。多半是下载中断，请重新下载后重试。"
+        )
+    if size < 4096:
+        return f"「{name}」只有 {size} 字节，明显不完整，请重新下载。"
+
+    return (
+        f"「{name}」无法解析：{exc}。"
+        f"文件可能已损坏，或用了本工具不支持的加密/压缩方式。"
+    )
+
+
 @dataclass
 class TextBlock:
     """一个可翻译的文字块（通常是自然段）。"""
@@ -626,7 +672,10 @@ class PdfExtractor:
         if not path.exists():
             raise FileNotFoundError(f"找不到文件：{path}")
 
-        doc = fitz.open(str(path))
+        try:
+            doc = fitz.open(str(path))
+        except Exception as exc:
+            raise PdfUnreadableError(_diagnose_unreadable(path, exc)) from exc
         try:
             return self._extract_doc(
                 doc, str(path), page_indices, translate_headers,
@@ -1121,6 +1170,7 @@ __all__ = [
     "PageLayout",
     "DocumentLayout",
     "PdfExtractor",
+    "PdfUnreadableError",
     "parse_page_range",
     "is_translatable",
     "normalise_text",

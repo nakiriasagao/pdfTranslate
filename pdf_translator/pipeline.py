@@ -221,16 +221,16 @@ class Pipeline:
         ]
         result.untranslated = len(untranslated)
         if untranslated:
-            where = "、".join(
-                f"第 {b.page + 1} 页" if hasattr(b, "page") else ""
-                for b in untranslated[:3]
-            )
+            pages = sorted({b.page_index + 1 for b in untranslated})
+            preview = "、".join(f"第 {p} 页" for p in pages[:5])
+            if len(pages) > 5:
+                preview += f" 等 {len(pages)} 页"
             result.warnings.append(
-                f"有 {len(untranslated)} 个段落未能翻译（保留原文，例如 {where}）。"
+                f"有 {len(untranslated)} 个段落未能翻译（保留原文，位于{preview}）。"
                 f"这些段落没有写入缓存，重新运行即可补齐。"
             )
             self.log(
-                f"   ⚠ 有 {len(untranslated)} 个段落未能翻译（保留原文），"
+                f"   ⚠ 有 {len(untranslated)} 个段落未能翻译（保留原文，位于{preview}），"
                 f"它们没有写入缓存，重跑即可补齐"
             )
 
